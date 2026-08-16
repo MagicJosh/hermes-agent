@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.path_security import has_traversal_component, validate_within_dir
-from tools.registry import registry
+from tools.registry import registry, tool_error
 
 # Deny patterns for reads — even inside the workspace, these are off-limits.
 DENY_READ_PATTERNS = [
@@ -277,3 +277,96 @@ def _issue_capability(
         json.dumps(cap, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return cap
+
+
+# --- Tool handlers ---
+
+COUNCIL_READ_SCHEMA = {
+    "name": "council_read",
+    "description": (
+        "Read a file within the architecture-council workspace. "
+        "The path must be relative to the workspace root. "
+        "Denied: .env, credentials, .git, profile homes, files outside the workspace."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": (
+                    "Relative path within the council workspace "
+                    "(e.g., '00-intake.json', 'drafts/analysis.md')"
+                ),
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Line number to start reading from (1-indexed)",
+                "default": 1,
+                "minimum": 1,
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of lines to read (default: 2000)",
+                "default": 2000,
+                "maximum": 2000,
+            },
+        },
+        "required": ["path"],
+    },
+}
+
+
+def _handle_council_read(args, **kw):
+    try:
+        cap = _load_capability()
+        ws = _workspace_root()
+        path_str = args.get("path", "")
+        if not path_str or not isinstance(path_str, str):
+            return tool_error("Missing required field 'path'")
+        try:
+            offset = max(1, int(args.get("offset", 1)))
+        except (TypeError, ValueError):
+            offset = 1
+        try:
+            limit = min(2000, max(1, int(args.get("limit", 2000))))
+        except (TypeError, ValueError):
+            limit = 2000
+        resolved = _validate_read_path(path_str, cap)
+        if not resolved.is_file():
+            _audit_operation(ws, "read", path_str, False, "file not found")
+            return tool_error(f"File not found: {path_str}")
+        text = resolved.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        start = min(offset - 1, len(lines))
+        if not lines:
+            _audit_operation(ws, "read", path_str, True, "empty file")
+            return "[empty file]"
+        if start >= len(lines):
+            _audit_operation(
+                ws, "read", path_str, True, f"offset {offset} beyond EOF"
+            )
+            return f"[offset {offset} beyond end of file ({len(lines)} lines)]"
+        end = min(len(lines), start + limit)
+        result_lines = [
+            f"{start + i + 1:6d}| {lines[start + i]}" for i in range(end - start)
+        ]
+        _audit_operation(ws, "read", path_str, True)
+        out = "\n".join(result_lines)
+        if end < len(lines):
+            out += f"\n\n[next_offset: {end + 1}]"
+        return out
+    except CapabilityError as e:
+        return tool_error(str(e))
+    except Exception as e:
+        return tool_error(f"Read failed: {e}")
+
+
+registry.register(
+    name="council_read",
+    toolset="architecture-council-scoped",
+    schema=COUNCIL_READ_SCHEMA,
+    handler=_handle_council_read,
+    check_fn=_check_council_worker,
+    emoji="📋",
+    max_result_size_chars=100_000,
+)
