@@ -370,3 +370,72 @@ registry.register(
     emoji="📋",
     max_result_size_chars=100_000,
 )
+
+
+COUNCIL_WRITE_SCHEMA = {
+    "name": "council_write",
+    "description": (
+        "Write content to an assigned draft file within the architecture-council workspace. "
+        "Only the exact draft paths listed in the current task capability are writable. "
+        "All other writes are denied."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": (
+                    "Relative path to the assigned draft file "
+                    "(e.g., 'drafts/analyze-analysis.md')"
+                ),
+            },
+            "content": {
+                "type": "string",
+                "description": "Complete file content to write",
+            },
+        },
+        "required": ["path", "content"],
+    },
+}
+
+
+def _handle_council_write(args, **kw):
+    try:
+        cap = _load_capability()
+        ws = _workspace_root()
+        path_str = args.get("path", "")
+        if not path_str or not isinstance(path_str, str):
+            return tool_error("Missing required field 'path'")
+        if "content" not in args:
+            return tool_error(
+                "Missing required field 'content'. The tool call included a path "
+                "but no content argument. Re-emit the call with the full content "
+                "payload."
+            )
+        content = args.get("content", "")
+        if not isinstance(content, str):
+            return tool_error("'content' must be a string")
+        resolved = _validate_write_path(path_str, cap)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(content, encoding="utf-8")
+        _audit_operation(ws, "write", path_str, True)
+        return json.dumps({
+            "success": True,
+            "path": path_str,
+            "resolved": str(resolved),
+            "bytes": len(content.encode("utf-8")),
+        })
+    except CapabilityError as e:
+        return tool_error(str(e))
+    except Exception as e:
+        return tool_error(f"Write failed: {e}")
+
+
+registry.register(
+    name="council_write",
+    toolset="architecture-council-scoped",
+    schema=COUNCIL_WRITE_SCHEMA,
+    handler=_handle_council_write,
+    check_fn=_check_council_worker,
+    emoji="✍️",
+)

@@ -1,5 +1,6 @@
 """Tests for the architecture-council scoped file tools."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from tools.council_scoped_tool import (
     CapabilityError,
     _check_council_worker,
     _handle_council_read,
+    _handle_council_write,
     _issue_capability,
     _load_capability,
     _validate_read_path,
@@ -188,3 +190,110 @@ def test_council_handler_read_denied_path(council_workspace):
     (council_workspace / ".env").write_text("SECRET=hello")
     result = _handle_council_read({"path": ".env"})
     assert "denied pattern" in result
+
+
+# --- Write path validation ---
+
+
+def test_council_write_allowed_draft(council_workspace):
+    cap = _load_capability()
+    path = _validate_write_path("drafts/analysis.md", cap)
+    assert path == (council_workspace / "drafts" / "analysis.md").resolve()
+
+
+def test_council_write_denied_unassigned_path(council_workspace):
+    cap = _load_capability()
+    with pytest.raises(CapabilityError, match="not in the assigned draft paths"):
+        _validate_write_path("drafts/unauthorized.md", cap)
+
+
+def test_council_write_denied_registry(council_workspace):
+    cap = _load_capability()
+    with pytest.raises(CapabilityError, match="not in the assigned draft paths"):
+        _validate_write_path("registry/claim-registry.json", cap)
+
+
+def test_council_write_denied_state(council_workspace):
+    cap = _load_capability()
+    with pytest.raises(CapabilityError, match="not in the assigned draft paths"):
+        _validate_write_path("state/workflow-state.json", cap)
+
+
+def test_council_write_denied_traversal(council_workspace):
+    cap = _load_capability()
+    with pytest.raises(CapabilityError, match="traversal"):
+        _validate_write_path("../other.md", cap)
+
+
+def test_council_write_denied_symlink(council_workspace):
+    # A symlink at the assigned draft path must be rejected, even if the
+    # capability lists it.
+    target = council_workspace / "drafts" / "analysis.md"
+    target.unlink()
+    (council_workspace / "drafts" / "real.md").write_text("real")
+    target.symlink_to(council_workspace / "drafts" / "real.md")
+    cap = _load_capability()
+    with pytest.raises(CapabilityError, match="symlink"):
+        _validate_write_path("drafts/analysis.md", cap)
+
+
+def test_council_read_denied_symlink_escape(council_workspace, tmp_path):
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("stolen")
+    symlink = council_workspace / "drafts" / "escape.md"
+    symlink.symlink_to(outside)
+    cap = _load_capability()
+    with pytest.raises(CapabilityError, match="escapes workspace"):
+        _validate_read_path("drafts/escape.md", cap)
+
+
+# --- council_write handler ---
+
+
+def test_council_handler_write_allowed(council_workspace):
+    result = _handle_council_write(
+        {"path": "drafts/analysis.md", "content": "# Analysis\nRewritten"}
+    )
+    assert '"success": true' in result
+    written = (council_workspace / "drafts" / "analysis.md").read_text(
+        encoding="utf-8"
+    )
+    assert written == "# Analysis\nRewritten"
+
+
+def test_council_handler_write_denied_path(council_workspace):
+    result = _handle_council_write(
+        {"path": "registry/claim-registry.json", "content": "{}"}
+    )
+    assert "not in the assigned draft paths" in result
+    assert not (council_workspace / "registry" / "claim-registry.json").exists()
+
+
+def test_council_handler_write_missing_content(council_workspace):
+    result = _handle_council_write({"path": "drafts/analysis.md"})
+    assert "Missing required field 'content'" in result
+
+
+def test_council_handler_write_non_string_content(council_workspace):
+    result = _handle_council_write(
+        {"path": "drafts/analysis.md", "content": 42}
+    )
+    assert "'content' must be a string" in result
+
+
+def test_council_handler_write_audits(council_workspace):
+    _handle_council_write(
+        {"path": "drafts/analysis.md", "content": "# Analysis\nAudited"}
+    )
+    audit_file = council_workspace / "audit" / "council-scoped-operations.jsonl"
+    assert audit_file.is_file()
+    events = [
+        json.loads(line)
+        for line in audit_file.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        e["operation"] == "write"
+        and e["path"] == "drafts/analysis.md"
+        and e["success"] is True
+        for e in events
+    )
