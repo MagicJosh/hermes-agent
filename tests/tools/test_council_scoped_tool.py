@@ -9,6 +9,7 @@ from tools.council_scoped_tool import (
     CapabilityError,
     _check_council_worker,
     _handle_council_read,
+    _handle_council_search,
     _handle_council_write,
     _issue_capability,
     _load_capability,
@@ -297,3 +298,52 @@ def test_council_handler_write_audits(council_workspace):
         and e["success"] is True
         for e in events
     )
+
+
+# --- council_search handler ---
+
+
+def test_council_handler_search_matches(council_workspace):
+    result = _handle_council_search({"pattern": "Draft content", "path": "drafts"})
+    assert "analysis.md:2:Draft content" in result
+
+
+def test_council_handler_search_confined_to_subdir(council_workspace):
+    # "decision_id" only exists in 00-intake.json at the workspace root,
+    # so a search confined to drafts/ must not see it.
+    result = _handle_council_search({"pattern": "decision_id", "path": "drafts"})
+    assert "no matches" in result
+
+
+def test_council_handler_search_no_matches(council_workspace):
+    result = _handle_council_search({"pattern": "zzz-definitely-no-match"})
+    assert "no matches" in result
+
+
+def test_council_handler_search_traversal_denied(council_workspace):
+    result = _handle_council_search({"pattern": "anything", "path": "../.."})
+    assert "traversal" in result
+
+
+def test_council_handler_search_outside_denied(council_workspace, tmp_path):
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("anything")
+    result = _handle_council_search(
+        {"pattern": "anything", "path": str(outside)}
+    )
+    assert "escapes workspace" in result
+
+
+def test_council_handler_search_missing_pattern(council_workspace):
+    result = _handle_council_search({"path": "drafts"})
+    assert "Missing required field 'pattern'" in result
+
+
+def test_council_handler_search_filters_denied_files(council_workspace):
+    marker = "SECRETMARKER123"
+    (council_workspace / ".env").write_text(f"KEY={marker}")
+    (council_workspace / "drafts" / "marker.md").write_text(f"note: {marker}")
+    result = _handle_council_search({"pattern": marker})
+    assert "marker.md" in result
+    assert ".env" not in result

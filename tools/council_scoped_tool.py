@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import secrets
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -438,4 +439,93 @@ registry.register(
     handler=_handle_council_write,
     check_fn=_check_council_worker,
     emoji="✍️",
+)
+
+
+COUNCIL_SEARCH_SCHEMA = {
+    "name": "council_search",
+    "description": (
+        "Search for a pattern in files within the architecture-council workspace. "
+        "Searches file contents using ripgrep. Results are confined to the workspace."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Regex pattern to search for",
+            },
+            "path": {
+                "type": "string",
+                "description": (
+                    "Relative directory within the workspace to search (default: '.')"
+                ),
+                "default": ".",
+            },
+        },
+        "required": ["pattern"],
+    },
+}
+
+
+def _handle_council_search(args, **kw):
+    try:
+        cap = _load_capability()
+        ws = _workspace_root()
+        pattern = args.get("pattern", "")
+        search_rel = args.get("path", ".")
+        if not pattern:
+            return tool_error("Missing required field 'pattern'")
+        if not isinstance(pattern, str):
+            return tool_error("'pattern' must be a string")
+        if not isinstance(search_rel, str) or not search_rel:
+            search_rel = "."
+        if has_traversal_component(search_rel):
+            return tool_error(f"Search path contains '..' traversal: {search_rel}")
+        # Validate the search path is within the workspace
+        root = Path(cap["allowed_read_root"]).resolve()
+        search_path = (
+            (root / search_rel).resolve()
+            if not Path(search_rel).is_absolute()
+            else Path(search_rel).resolve()
+        )
+        error = validate_within_dir(search_path, root)
+        if error:
+            return tool_error(f"Search path escapes workspace: {error}")
+        # Use ripgrep for fast searching, confined to the validated path.
+        # Fixed argv (no shell); -e keeps patterns starting with '-' safe.
+        result = subprocess.run(
+            ["rg", "--no-heading", "-n", "-e", pattern, str(search_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        success = result.returncode == 0
+        _audit_operation(
+            ws, "search", search_rel, success, f"pattern={pattern}"
+        )
+        # Filter out denied patterns from results
+        filtered = [
+            line for line in result.stdout.splitlines()
+            if not any(p in line for p in [".env", ".git/", "auth.json"])
+        ]
+        if filtered:
+            return "\n".join(filtered)
+        return json.dumps({"results": "no matches"})
+    except CapabilityError as e:
+        return tool_error(str(e))
+    except FileNotFoundError:
+        return tool_error("Search failed: 'rg' (ripgrep) is not installed")
+    except subprocess.TimeoutExpired:
+        return tool_error("Search failed: ripgrep timed out")
+    except Exception as e:
+        return tool_error(f"Search failed: {e}")
+
+
+registry.register(
+    name="council_search",
+    toolset="architecture-council-scoped",
+    schema=COUNCIL_SEARCH_SCHEMA,
+    handler=_handle_council_search,
+    check_fn=_check_council_worker,
+    emoji="🔎",
+    max_result_size_chars=100_000,
 )
