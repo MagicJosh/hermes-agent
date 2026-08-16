@@ -333,6 +333,17 @@ TOOLSETS = {
         "includes": [],
     },
 
+    "architecture-council-scoped": {
+        "description": (
+            "Path-confined file tools for architecture-council worker profiles. "
+            "Provides council_read, council_write, and council_search that enforce "
+            "a controller-issued capability. Workers can read workspace files and "
+            "write only assigned draft paths."
+        ),
+        "tools": ["council_read", "council_write", "council_search"],
+        "includes": [],
+    },
+
     "discord": {
         "description": "Discord read and participate tools (fetch messages, search members, create threads)",
         "tools": ["discord"],
